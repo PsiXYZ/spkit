@@ -1,0 +1,8 @@
+[build-system]
+requires = ["setuptools", "numpy", "scipy", "lmfit", "matplotlib", "pandas", "ipympl", "ipywidgets", "PySide6"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sptoolkit"
+version = "0.0.1"
+dependencies = ["numpy", "scipy", "lmfit", "matplotlib", "pandas", "PySide6"]
