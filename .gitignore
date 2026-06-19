@@ -3,6 +3,8 @@
 *.csv
 *.zip
 
+!src/in/references/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
