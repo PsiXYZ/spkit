@@ -1,8 +1,27 @@
 [build-system]
-requires = ["setuptools", "numpy", "scipy", "lmfit", "matplotlib", "pandas", "ipympl", "ipywidgets", "PySide6"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sptoolkit"
 version = "0.0.1"
 dependencies = ["numpy", "scipy", "lmfit", "matplotlib", "pandas", "PySide6"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+sptoolkit-deconv = "sptoolkit.deconv.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools]
+py-modules = ["deconv_app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

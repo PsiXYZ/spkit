@@ -3,7 +3,9 @@
 *.csv
 *.zip
 
-!src/in/references/*
+!examples/in/references/*
+out/
+src/out/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

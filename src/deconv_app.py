@@ -3,18 +3,13 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-import itertools
 import os
-import re
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import lmfit.models as md
 import matplotlib
 import numpy as np
-import pandas as pd
 from lmfit.model import ModelResult
 from matplotlib.backend_bases import MouseEvent
 
@@ -48,53 +43,42 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-PEAK_MODELS = {
-    "Gaussian": md.GaussianModel,
-    "Lorentzian": md.LorentzianModel,
-    "Voigt": md.VoigtModel,
-    "PseudoVoigt": md.PseudoVoigtModel,
-}
-
-DEFAULT_XLIM = (1550.0, 1700.0)
-DEFAULT_YLIM = (0.0, 4300.0)
-DEFAULT_SIGMA = 1.0
-DEFAULT_CENTER_SPAN = 4.0
-DEFAULT_AMPLITUDE_MAX = 100000.0
-DEFAULT_SIGMA_MAX = 20.0
-DRAG_PICK_RADIUS_PX = 12.0
-MAX_PLOT_POINTS = 5000
-
-COLOR_SPECTRUM = "#c2410c"
-COLOR_FIT = "#2563eb"
-COLOR_BASELINE = "#6b7280"
-COLOR_SELECTED = "#f59e0b"
-COLOR_MARKER = "#111827"
-
-
-@dataclass
-class ParamSpec:
-    value: float
-    minimum: float | None = None
-    maximum: float | None = None
-    vary: bool = True
-
-
-@dataclass
-class PeakSpec:
-    kind: str
-    center: ParamSpec
-    amplitude: ParamSpec
-    sigma: ParamSpec
-    extras: dict[str, ParamSpec] = field(default_factory=dict)
-
-    def all_params(self) -> dict[str, ParamSpec]:
-        params = {
-            "center": self.center,
-            "amplitude": self.amplitude,
-            "sigma": self.sigma,
-        }
-        params.update(self.extras)
-        return params
+from sptoolkit.deconv.array_ops import (
+    baseline_edge_mask,
+    decimate_for_plot,
+    finite_bound,
+    window_mask,
+)
+from sptoolkit.deconv.constants import (
+    COLOR_BASELINE,
+    COLOR_FIT,
+    COLOR_MARKER,
+    COLOR_SELECTED,
+    COLOR_SPECTRUM,
+    DEFAULT_AMPLITUDE_MAX,
+    DEFAULT_CENTER_SPAN,
+    DEFAULT_SIGMA,
+    DEFAULT_SIGMA_MAX,
+    DEFAULT_XLIM,
+    DEFAULT_YLIM,
+    DRAG_PICK_RADIUS_PX,
+    PEAK_MODELS,
+)
+from sptoolkit.deconv.fitting import (
+    build_model_and_params,
+    update_peak_specs_from_result,
+)
+from sptoolkit.deconv.models import ParamSpec, PeakSpec
+from sptoolkit.deconv.paths import make_unique_dir, safe_name
+from sptoolkit.deconv.peak_params import (
+    read_peak_params_csv,
+    write_peak_params_csv,
+)
+from sptoolkit.deconv.spectrum_io import (
+    find_csv_files,
+    read_spectrum,
+    resolve_initial_file,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,89 +90,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ylim", type=float, nargs=2, default=DEFAULT_YLIM)
     parser.add_argument("--method", default="least_squares")
     return parser.parse_args()
-
-
-def find_csv_files(input_dir: Path) -> list[Path]:
-    input_dir.mkdir(parents=True, exist_ok=True)
-    return sorted(path for path in input_dir.rglob("*.csv") if path.is_file())
-
-
-def resolve_initial_file(input_dir: Path, file_arg: Path | None, files: list[Path]) -> Path:
-    if file_arg is None:
-        if not files:
-            raise FileNotFoundError(f"No CSV files found under {input_dir}")
-        return files[0]
-    if file_arg.is_absolute():
-        return file_arg
-    candidate = input_dir / file_arg
-    return candidate if candidate.exists() else file_arg.resolve()
-
-
-def read_spectrum(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    df = pd.read_csv(path)
-    if df.shape[1] < 2:
-        raise ValueError(f"{path} must contain at least two columns")
-    x = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
-    y = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
-    valid = np.isfinite(x) & np.isfinite(y)
-    x = x[valid]
-    y = y[valid]
-    order = np.argsort(x)
-    return x[order], y[order]
-
-
-def window_mask(x: np.ndarray, xlim: tuple[float, float]) -> np.ndarray:
-    lo, hi = sorted(xlim)
-    return (x >= lo) & (x <= hi)
-
-
-def baseline_edge_mask(x: np.ndarray, xlim: tuple[float, float]) -> np.ndarray:
-    lo, hi = sorted(xlim)
-    span = hi - lo
-    edge = min(10.0, max(span * 0.1, np.finfo(float).eps))
-    return ((x >= lo) & (x <= lo + edge)) | ((x >= hi - edge) & (x <= hi))
-
-
-def decimate_for_plot(
-    x: np.ndarray, y: np.ndarray, max_points: int = MAX_PLOT_POINTS
-) -> tuple[np.ndarray, np.ndarray]:
-    if x.size <= max_points:
-        return x, y
-    step = int(np.ceil(x.size / max_points))
-    return x[::step], y[::step]
-
-
-def safe_name(path: Path) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", path.stem).strip("_") or "spectrum"
-
-
-def make_unique_dir(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for index in itertools.count(1):
-        candidate = path.with_name(f"{path.name}_{index:02d}")
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError("Could not allocate output directory")
-
-
-def finite_bound(value: float | None) -> float:
-    if value is None:
-        return np.nan
-    return float(value)
-
-
-def optional_float_from_text(value: Any) -> float | None:
-    text = "" if value is None else str(value).strip()
-    if not text or text.lower() in {"nan", "none", "null"}:
-        return None
-    return float(text)
-
-
-def bool_from_text(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 class OptionalFloatEdit(QLineEdit):
@@ -626,32 +527,11 @@ class DeconvolutionWindow(QMainWindow):
         self.redraw()
 
     def build_model_and_params(self) -> tuple[Any, Any]:
-        model = md.LinearModel(prefix="bl_")
-        for index, peak in enumerate(self.peaks, start=1):
-            model += PEAK_MODELS[peak.kind](prefix=f"p{index}_")
-        params = model.make_params()
-        self.apply_baseline_params(params)
-        for index, peak in enumerate(self.peaks, start=1):
-            prefix = f"p{index}_"
-            for name, spec in peak.all_params().items():
-                full_name = prefix + name
-                if full_name not in params:
-                    continue
-                if name == "gamma":
-                    params[full_name].expr = None
-                params[full_name].set(
-                    value=spec.value,
-                    min=-np.inf if spec.minimum is None else spec.minimum,
-                    max=np.inf if spec.maximum is None else spec.maximum,
-                    vary=spec.vary,
-                )
-        return model, params
-
-    def apply_baseline_params(self, params: Any) -> None:
-        slope, intercept = self.get_baseline_coeffs()
-        vary = self.fit_baseline_box.isChecked()
-        params["bl_intercept"].set(value=intercept, vary=vary)
-        params["bl_slope"].set(value=slope, vary=vary)
+        return build_model_and_params(
+            self.peaks,
+            self.get_baseline_coeffs(),
+            self.fit_baseline_box.isChecked(),
+        )
 
     def get_baseline_coeffs(self) -> tuple[float, float]:
         if self.baseline_coeffs is not None:
@@ -703,16 +583,7 @@ class DeconvolutionWindow(QMainWindow):
     def update_peak_specs_from_result(self, sync: bool = False) -> None:
         if self.result is None:
             return
-        for index, peak in enumerate(self.peaks, start=1):
-            prefix = f"p{index}_"
-            for name, spec in peak.all_params().items():
-                full_name = prefix + name
-                if full_name in self.result.params:
-                    param = self.result.params[full_name]
-                    spec.value = float(param.value)
-                    spec.minimum = None if np.isneginf(param.min) else float(param.min)
-                    spec.maximum = None if np.isposinf(param.max) else float(param.max)
-                    spec.vary = bool(param.vary)
+        update_peak_specs_from_result(self.peaks, self.result)
         if sync:
             self.sync_controls()
 
@@ -1038,78 +909,10 @@ class DeconvolutionWindow(QMainWindow):
         self.set_status(f"Imported {len(self.peaks)} peak(s) from {path}")
 
     def write_peak_params_csv(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["peak", "kind", "param", "value", "min", "max", "vary"])
-            for index, peak in enumerate(self.peaks, start=1):
-                for name, spec in peak.all_params().items():
-                    writer.writerow(
-                        [
-                            index,
-                            peak.kind,
-                            name,
-                            spec.value,
-                            "" if spec.minimum is None else spec.minimum,
-                            "" if spec.maximum is None else spec.maximum,
-                            spec.vary,
-                        ]
-                    )
+        write_peak_params_csv(path, self.peaks)
 
     def read_peak_params_csv(self, path: Path) -> list[PeakSpec]:
-        grouped: dict[int, dict[str, Any]] = {}
-        with path.open("r", newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle)
-            required = {"peak", "kind", "param", "value", "min", "max", "vary"}
-            if reader.fieldnames is None or not required.issubset(reader.fieldnames):
-                raise ValueError(
-                    "Peak CSV must contain columns: peak, kind, param, value, min, max, vary"
-                )
-            for row_number, row in enumerate(reader, start=2):
-                peak_index = int(row["peak"])
-                kind = str(row["kind"]).strip()
-                name = str(row["param"]).strip()
-                if peak_index < 1:
-                    raise ValueError(f"Row {row_number}: peak index must be >= 1")
-                if kind not in PEAK_MODELS:
-                    raise ValueError(f"Row {row_number}: unsupported peak type {kind!r}")
-                if not name:
-                    raise ValueError(f"Row {row_number}: empty parameter name")
-                grouped.setdefault(peak_index, {"kind": kind, "params": {}})
-                if grouped[peak_index]["kind"] != kind:
-                    raise ValueError(f"Row {row_number}: mixed peak types for p{peak_index}")
-                grouped[peak_index]["params"][name] = ParamSpec(
-                    value=float(row["value"]),
-                    minimum=optional_float_from_text(row["min"]),
-                    maximum=optional_float_from_text(row["max"]),
-                    vary=bool_from_text(row["vary"]),
-                )
-
-        peaks: list[PeakSpec] = []
-        for peak_index in sorted(grouped):
-            data = grouped[peak_index]
-            params = data["params"]
-            missing = {"center", "amplitude", "sigma"} - set(params)
-            if missing:
-                names = ", ".join(sorted(missing))
-                raise ValueError(f"Peak p{peak_index} is missing required parameter(s): {names}")
-            extras = {
-                name: spec
-                for name, spec in params.items()
-                if name not in {"center", "amplitude", "sigma"}
-            }
-            peaks.append(
-                PeakSpec(
-                    kind=data["kind"],
-                    center=params["center"],
-                    amplitude=params["amplitude"],
-                    sigma=params["sigma"],
-                    extras=extras,
-                )
-            )
-        if not peaks:
-            raise ValueError("Peak CSV does not contain any peaks")
-        return peaks
+        return read_peak_params_csv(path)
 
 
 def main() -> int:
