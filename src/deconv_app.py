@@ -389,6 +389,10 @@ class DeconvolutionWindow(QMainWindow):
         if filename:
             path = Path(filename)
             self.remember_dialog_dir(path.parent)
+            self.files = find_csv_files(path.parent)
+            if path not in self.files:
+                self.files.append(path)
+                self.files.sort()
             self.load_file(path)
 
     def switch_file(self, step: int) -> None:
