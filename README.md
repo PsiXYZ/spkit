@@ -11,6 +11,10 @@ python -m pip install -e ".[dev]"
 ## Run
 
 ```powershell
+sptoolkit-deconv
+```
+
+```powershell
 sptoolkit-deconv --input-dir src/in
 ```
 

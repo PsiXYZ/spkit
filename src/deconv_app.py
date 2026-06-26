@@ -19,7 +19,7 @@ matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -71,7 +71,11 @@ from sptoolkit.deconv.fitting import (
 from sptoolkit.deconv.models import ParamSpec, PeakSpec
 from sptoolkit.deconv.paths import make_unique_dir, safe_name
 from sptoolkit.deconv.peak_params import (
+    PeakParamsDocument,
+    read_peak_params,
+    read_peak_params_document,
     read_peak_params_csv,
+    write_peak_params,
     write_peak_params_csv,
 )
 from sptoolkit.deconv.spectrum_io import (
@@ -107,7 +111,7 @@ class DeconvolutionWindow(QMainWindow):
     def __init__(
         self,
         files: list[Path],
-        initial_file: Path,
+        initial_file: Path | None,
         xlim: tuple[float, float],
         ylim: tuple[float, float],
         fit_method: str,
@@ -115,7 +119,7 @@ class DeconvolutionWindow(QMainWindow):
         super().__init__()
         self.files = files
         self.file_index = self.files.index(initial_file) if initial_file in self.files else 0
-        self.current_file = initial_file
+        self.current_file = initial_file or Path("No spectrum loaded")
         self.xlim = (float(xlim[0]), float(xlim[1]))
         self.ylim = (float(ylim[0]), float(ylim[1]))
         self.fit_method = fit_method
@@ -130,12 +134,22 @@ class DeconvolutionWindow(QMainWindow):
         self.baseline_coeffs: tuple[float, float] | None = None
         self.spectrum_cache: dict[Path, tuple[np.ndarray, np.ndarray]] = {}
         self.syncing_controls = False
+        self.settings = QSettings("sptoolkit", "deconv")
+        self.default_input_dir = Path(__file__).resolve().parent / "in"
+        self.default_output_dir = Path(__file__).resolve().parent / "out"
+        if initial_file is not None:
+            self.remember_dialog_dir(initial_file.parent)
 
         self.setWindowTitle("VIP DECONVOLUTION TOOL 5000$ PER LICENSE")
         self.resize(1420, 820)
         self._build_ui()
         self._connect_canvas()
-        self.load_file(initial_file)
+        if initial_file is None:
+            self.sync_controls()
+            self.set_status("No CSV files found. Use Browse to open a spectrum.")
+            self.redraw(draw_preview=False)
+        else:
+            self.load_file(initial_file)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -306,6 +320,23 @@ class DeconvolutionWindow(QMainWindow):
     def set_status(self, message: str) -> None:
         self.status.setText(message)
 
+    def dialog_dir(self, fallback: Path | None = None) -> Path:
+        saved = self.settings.value("last_dialog_dir", "", type=str)
+        if saved:
+            path = Path(saved)
+            if path.is_dir():
+                return path
+        if fallback is not None:
+            return fallback
+        if self.current_file.parent.is_dir():
+            return self.current_file.parent
+        return self.default_input_dir
+
+    def remember_dialog_dir(self, path: Path) -> None:
+        directory = path if path.is_dir() else path.parent
+        if directory:
+            self.settings.setValue("last_dialog_dir", str(directory))
+
     def load_file(self, path: Path) -> None:
         try:
             self.current_file = path
@@ -352,11 +383,13 @@ class DeconvolutionWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Open spectrum",
-            str(Path(__file__).resolve().parent / "in"),
+            str(self.dialog_dir(self.default_input_dir)),
             "CSV files (*.csv *.CSV);;All files (*.*)",
         )
         if filename:
-            self.load_file(Path(filename))
+            path = Path(filename)
+            self.remember_dialog_dir(path.parent)
+            self.load_file(path)
 
     def switch_file(self, step: int) -> None:
         if not self.files:
@@ -740,11 +773,12 @@ class DeconvolutionWindow(QMainWindow):
         dirname = QFileDialog.getExistingDirectory(
             self,
             "Select folder with spectra",
-            str(Path(__file__).resolve().parent / "in"),
+            str(self.dialog_dir(self.default_input_dir)),
         )
         if not dirname:
             return
         input_dir = Path(dirname)
+        self.remember_dialog_dir(input_dir)
         files = find_csv_files(input_dir)
         if not files:
             self.set_status(f"No CSV files found under {input_dir}")
@@ -864,46 +898,51 @@ class DeconvolutionWindow(QMainWindow):
         if not self.peaks:
             self.set_status("No peaks to export.")
             return
-        default_dir = Path(__file__).resolve().parent / "out"
+        default_dir = self.dialog_dir(self.default_output_dir)
         default_dir.mkdir(parents=True, exist_ok=True)
-        default_path = default_dir / f"{safe_name(self.current_file)}_peak_params.csv"
-        filename, _ = QFileDialog.getSaveFileName(
+        default_path = default_dir / f"{safe_name(self.current_file)}_peak_params.json"
+        filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export peak parameters",
             str(default_path),
-            "CSV files (*.csv *.CSV);;All files (*.*)",
+            "JSON files (*.json *.JSON);;CSV files (*.csv *.CSV);;Peak parameter files (*.json *.JSON *.csv *.CSV);;All files (*.*)",
         )
         if not filename:
             return
         path = Path(filename)
         if path.suffix == "":
-            path = path.with_suffix(".csv")
+            suffix = ".json" if "JSON" in selected_filter else ".csv"
+            path = path.with_suffix(suffix)
         try:
-            self.write_peak_params_csv(path)
+            self.write_peak_params(path)
         except Exception as exc:
             QMessageBox.critical(self, "Peak export failed", str(exc))
             return
+        self.remember_dialog_dir(path.parent)
         self.set_status(f"Exported peak parameters to {path}")
 
     def import_peak_params(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Import peak parameters",
-            str(Path(__file__).resolve().parent / "out"),
-            "CSV files (*.csv *.CSV);;All files (*.*)",
+            str(self.dialog_dir(self.default_output_dir)),
+            "JSON files (*.json *.JSON);;CSV files (*.csv *.CSV);;Peak parameter files (*.json *.JSON *.csv *.CSV);;All files (*.*)",
         )
         if not filename:
             return
         path = Path(filename)
         try:
-            peaks = self.read_peak_params_csv(path)
+            document = self.read_peak_params_document(path)
         except Exception as exc:
             QMessageBox.critical(self, "Peak import failed", str(exc))
             return
-        self.peaks = peaks
+        self.remember_dialog_dir(path.parent)
+        self.peaks = document.peaks
         self.selected_index = 0 if self.peaks else None
         self.result = None
         self.baseline_coeffs = None
+        if document.deconvolution_range is not None:
+            self.set_deconvolution_range(document.deconvolution_range)
         self.sync_controls()
         self.redraw()
         self.set_status(f"Imported {len(self.peaks)} peak(s) from {path}")
@@ -914,6 +953,26 @@ class DeconvolutionWindow(QMainWindow):
     def read_peak_params_csv(self, path: Path) -> list[PeakSpec]:
         return read_peak_params_csv(path)
 
+    def write_peak_params(self, path: Path) -> None:
+        write_peak_params(path, self.peaks, self.xlim)
+
+    def read_peak_params(self, path: Path) -> list[PeakSpec]:
+        return read_peak_params(path)
+
+    def read_peak_params_document(self, path: Path) -> PeakParamsDocument:
+        return read_peak_params_document(path)
+
+    def set_deconvolution_range(self, xlim: tuple[float, float]) -> None:
+        self.xlim = (float(xlim[0]), float(xlim[1]))
+        self.xmin_spin.blockSignals(True)
+        self.xmax_spin.blockSignals(True)
+        try:
+            self.xmin_spin.setValue(self.xlim[0])
+            self.xmax_spin.setValue(self.xlim[1])
+        finally:
+            self.xmin_spin.blockSignals(False)
+            self.xmax_spin.blockSignals(False)
+
 
 def main() -> int:
     args = parse_args()
@@ -922,16 +981,11 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication(sys.argv)
     try:
-        initial_file = resolve_initial_file(input_dir, args.file, files).resolve()
-    except FileNotFoundError as exc:
-        QMessageBox.warning(
-            None,
-            "No input files",
-            f"{exc}\n\nPut CSV files into:\n{input_dir}",
-        )
-        return 0
+        initial_file: Path | None = resolve_initial_file(input_dir, args.file, files).resolve()
+    except FileNotFoundError:
+        initial_file = None
 
-    if initial_file not in files:
+    if initial_file is not None and initial_file not in files:
         files.append(initial_file)
         files.sort()
 

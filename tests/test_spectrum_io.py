@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from sptoolkit.deconv.spectrum_io import read_spectrum
+from sptoolkit.deconv.spectrum_io import find_csv_files, read_spectrum
+
+
+def test_find_csv_files_creates_missing_input_dir(tmp_path):
+    input_dir = tmp_path / "in"
+
+    files = find_csv_files(input_dir)
+
+    assert files == []
+    assert input_dir.is_dir()
 
 
 def test_read_spectrum_sorts_and_drops_invalid_rows(tmp_path):
@@ -20,4 +29,3 @@ def test_read_spectrum_sorts_and_drops_invalid_rows(tmp_path):
 
     np.testing.assert_allclose(x, [1.0, 3.0])
     np.testing.assert_allclose(y, [10.0, 30.0])
-
